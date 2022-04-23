@@ -1,2 +1,2 @@
 # HypeXAPI
-Connector for Hype with xAPI
+Connecting Hype and xAPI
