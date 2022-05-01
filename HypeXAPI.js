@@ -1,5 +1,5 @@
 /*!
-Hype xAPI 1.0.5
+Hype xAPI 1.0.6
 copyright (c) 2022 Max Ziebell, (https://maxziebell.de). MIT-license
 */
 
@@ -10,7 +10,8 @@ copyright (c) 2022 Max Ziebell, (https://maxziebell.de). MIT-license
 * 1.0.2 Added support for functions in the lookup directly
 * 1.0.3 Resolving functions works recursive and variables are supported
 * 1.0.4 Fixed resolve error in the variable syntax when returning objects from functions
-* 1.0.5 Added resolve of array notation
+* 1.0.5 Added resolve of array notation, adding support for local execution and export script
+* 1.0.6 Added documentation, Fixed regression, 
 */
 if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
     
@@ -27,8 +28,11 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
     }
     
     var _error = false;
-
+    
     var _default = {
+    
+        /* use HypeActionEvents if available for expressions */
+        useHypeActionEvents: true,
     
         getDefaultActor: function(){
             return getDefault('defaultActor');
@@ -41,6 +45,8 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
     
         /*
          * Debugging in Hype
+         * TODO: maybe link to ADL.XAPIWrapper.log.debug
+         * or allow way to make it accessible via Hype
          */
         debug: false,
     
@@ -96,23 +102,12 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
             _error = true;
         }
     }
-
+    
     /**
-     * Resolve verb looking at custom verbs and falling back onto ADL verbs
-     *
-     * Existing list of verbs (xapi.vocab.pub/index.html or console.log(ADL.verbs) ): 
-     *
-     * abandoned, answered, asked, attempted, attended, commented, completed, 
-     * exited, experienced, failed, imported, initialized, interacted, launched, 
-     * mastered, passed, preferred, progressed, registered, responded, resumed, 
-     * satisfied, scored, shared, suspended, terminated, voided
+     * This function takes a key and returns an array of the key
+     * @param {string} key
+     * @returns {array}
      */
-     
-    function resolveVerb(id){
-        return getDefault('verbs')[id] || ADL.verbs[id] || null;
-    }
-    
-    
     function resolveKeyToArray(key){
         if(Array.isArray(key)) return key.reduce(function(a,b){
             return a.concat(resolveKeyToArray(b));
@@ -124,11 +119,46 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
         key = key.replace(/^\./, '');
         return key.split('.');
     }
+    
+    /**
+     * This function takes an object, a key and a boolean value and returns the value of the object at the key.
+     *
+     * @param {object} obj - The object to be searched.
+     * @param {string} key - The key to be searched for.
+     * @param {boolean} create - A boolean value that determines whether the object should be created if it does not exist.
+     * @returns {object} - The value of the object at the key.
+     */
+    function resolveObjectByKey(obj, key, create) {
+        var keyParts = resolveKeyToArray(key);
+        var objValue = obj;
+        var i = 0;
+        while (objValue!==undefined && i < keyParts.length) {
+            
+            if (create && objValue[keyParts[i]] == undefined) {
+                if (keyParts[i+1] && /^\d+$/.test(keyParts[i+1])){
+                    objValue[keyParts[i]] = [];
+                } else {
+                    objValue[keyParts[i]] = {};
+                }
+            }
+            
+            objValue = objValue[keyParts[i]];
+            
+            if (typeof objValue === 'function') {
+                objValue = objValue();
+            }
+            i++;
+        }
+        return objValue;
+    }
  
     /**
-     * Resolve function and vars in the lookup
+     * Resolves functions and variables in an object
      *
-     */  
+     * @param {Object} obj - The object to resolve
+     * @param {Object} lookup - The lookup object
+     * @returns {Object} - The resolved object
+     */ 
     function resolveFunctionsAndVars(obj, lookup) {
         while (typeof obj === 'function') obj = obj();
         if (typeof obj === 'object') {
@@ -142,17 +172,8 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
                     var matches = obj[key].match(/\$\{(.*?)\}/g);
                     if (matches) {
                         matches.forEach(function(match) {
-                            var variable = match.replace(/\$\{|\}|\(\)/g, '');
-                            var variableParts = resolveKeyToArray(variable);
-                            var variableValue = lookup;
-                            var i = 0;
-                            while (variableValue!==undefined && i < variableParts.length) {
-                                variableValue = variableValue[variableParts[i]];
-                                if (typeof variableValue === 'function') {
-                                    variableValue = variableValue();
-                                }
-                                i++;
-                            }
+                            var variableKey = match.replace(/\$\{|\}|\(\)/g, '');
+                            var variableValue = resolveObjectByKey(lookup, variableKey);
                             obj[key] = obj[key].replace(match, variableValue);
                         });
                     }
@@ -163,64 +184,169 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
     }
     
     /**
+     * This function is used to resolve the object notation.
+     *
+     * @param {string} str - The string to be resolved.
+     * @param {object} variables - The variables to be used.
+     * @returns {object} - The resolved object.
+     */
+    function resolveObjectNotation(str, variables){
+        if (/^\{.*\}$/.test(str)){
+            try {
+                return new Function('$ctx', 'with($ctx) { return new Object(' + str + ')}')(variables);
+            } catch (e) {
+                try {
+                    return JSON.parse(str);
+                } catch (e) {
+                    if (getDefault('debug')) console.error ("xAPI: Malformed object notation:\n"+key)
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Resolve a dictionary key
+     *
+     * @param {Object} dict - The dictionary
+     * @param {Object} key - The key
+     * @param {Object} variables - The variables
+     * @returns {Object}
+     */
+    function resolveDictonaryKey(dict, key, variables){
+        switch (typeof(key)){
+            case "string":
+                key = key.trim();
+                
+                var obj = resolveObjectNotation(key, variables);
+                if (obj) return obj;
+                
+                if (getDefault(dict) && typeof(getDefault(dict)[ key ])=='object') {
+                    return cloneObject(getDefault(dict)[ key ]);
+                }
+                
+                return resolveVerbADL(key);
+                break;
+            
+            case "object":
+                // forward object
+                return key;
+                break;
+        }
+    }
+    
+    /**
+     * Resolve verb looking at ADL verbs (xAPI)
+     *
+     * Existing list of verbs (xapi.vocab.pub/index.html or console.log(ADL.verbs) ): 
+     *
+     * abandoned, answered, asked, attempted, attended, commented, completed, 
+     * exited, experienced, failed, imported, initialized, interacted, launched, 
+     * mastered, passed, preferred, progressed, registered, responded, resumed, 
+     * satisfied, scored, shared, suspended, terminated, voided
+     *
+     * @param {string} id - The verb id
+     * @returns {object} - The verb object or null
+     */   
+    function resolveVerbADL(id){
+        if (ADL.verbs && ADL.verbs[id]) {
+            return ADL.verbs[id];
+        }
+    }
+    
+    /**
+     * This function clones an object
+     *
+     * @param {object} obj - The object to be cloned
+     * @returns {object} - The cloned object
+     */
+    function cloneObject(obj) {
+        if (null == obj || "object" != typeof obj) return obj;
+        var copy = obj.constructor();
+        for (var attr in obj) {
+            if (obj.hasOwnProperty(attr)) copy[attr] = cloneObject(obj[attr]);
+        }
+        return copy;
+    }
+    
+    /**
      * This function send a statement based on dataset attributes
      *
      * @param {HTMLDivElement} element This is the element the attributes should be taken from
      */
     function sendStatementByDataset(element){
+        
         // only act if event target is defined
         if (!element) return;
         
-        // get attributes
-        var config = {
-            'agent':                element.getAttribute('data-xapi-agent'),
-            'verb':                 element.getAttribute('data-xapi-verb'),
-            'object':               element.getAttribute('data-xapi-object'),
-            'result':               element.getAttribute('data-xapi-result'),
-            'context':              element.getAttribute('data-xapi-context'),
-            
-            'parent-activity':      element.getAttribute('data-xapi-parent-activity'),
-            'grouping-activity':    element.getAttribute('data-xapi-grouping-activity'),
-            'context-activity':     element.getAttribute('data-xapi-context-activity'),
-            
-            'verb-id':              element.getAttribute('data-xapi-verb-id'),
-            'verb-name':            element.getAttribute('data-xapi-verb-name'),
-            
-            'object-id':            element.getAttribute('data-xapi-object-id'),
-            'object-name':          element.getAttribute('data-xapi-object-name'),
-            'object-desc':          element.getAttribute('data-xapi-object-desc'),
-            
-            'agent-name':           element.getAttribute('data-xapi-agent-name'),
-            'agent-mbox':           element.getAttribute('data-xapi-agent-mbox'),
-            'agent-hash':           element.hasAttribute('data-xapi-agent-hash'),
-            'agent-account-page':   element.getAttribute('data-xapi-agent-account-page'),
-            'agent-account-name':   element.getAttribute('data-xapi-agent-account-name'),
-            
-            'debug':  element.getAttribute('data-xapi-debug'),  
+        sendStatementByDictonary({
+            element: element,
+        })
+    }
+    /**
+     * Get the xAPI configuration from the element attributes
+     *
+     * @param {HTMLElement} element
+     * @returns {Object}
+     */
+    function getXapiConfigFromAttributes(element) {
+        var config = {};
+        var attrs = element.attributes;
+        for (var i = 0; i < attrs.length; i++) {
+            var attr = attrs[i];
+            if (attr.name.indexOf('data-xapi-') === 0) {
+                var key = attr.name.replace('data-xapi-', '');
+                config[key] = attr.value;
+            }
         }
-        
-        sendStatementByConfig(config);
+        return config;
     }
     
+      
+
+    
     /**
-     * This function send a statement based on a config object equivalent to the dataset keys (without data-xapi- prefix)
+     * This function send a statement based on a config object equivalent to the dataset keys (without data-xapi- prefix).
+     * It will resolve all the keys in the config object and send the statement.
      *
-     * @param {Object} config This is an config object containing all the keys for the statement (at least verb and object are necessary)
+     * @param {Object} config This is an config object containing all the keys for the statement (at least verb and object are necessary).
+     * @param {Object} config.element This is the element that will be used to get the xapi config from the attributes.
+     * @param {Object} config.agent This is the agent that will be used in the statement.
+     * @param {Object} config.verb This is the verb that will be used in the statement.
+     * @param {Object} config.object This is the object that will be used in the statement.
+     * @param {Object} config.result This is the result that will be used in the statement.
+     * @param {Object} config.context This is the context that will be used in the statement.
+     * @param {Object} config.parent-activity This is the parent activity that will be used in the statement.
+     * @param {Object} config.grouping-activity This is the grouping activity that will be used in the statement.
+     * @param {Object} config.context-activity This is the context activity that will be used in the statement.
+     * @param {Object} config.verb-id This is the verb id that will be used in the statement.
+     * @param {Object} config.verb-name This is the verb name that will be used in the statement.
+     * @param {Object} config.object-id This is the object id that will be used in the statement.
+     * @param {Object} config.object-name This is the object name that will be used in the statement.
+     * @param {Object} config.object-desc This is the object description that will be used in the statement.
      */
-    function sendStatementByConfig(config){
+    function sendStatementByDictonary(config){
+                
         // only act if event target is defined
         if (!config) return;
         
+        if (config.element){
+            config = Object.assign(getXapiConfigFromAttributes(config.element), config)
+        }
+        
         // search for keys in lookup, TODO search in hypeDocument functions       
-        var xAPI_actor = resolveFunctionsAndVars( getDefault('actors')[ config['agent'] ] || config['agent'], getDefault('variables'));
-        var xAPI_verb = resolveFunctionsAndVars( resolveVerb(config['verb']) || config['verb'], getDefault('variables'));
-        var xAPI_object = resolveFunctionsAndVars( getDefault('objects')[ config['object'] ] || config['object'], getDefault('variables'));
-        var xAPI_result = resolveFunctionsAndVars( getDefault('results')[ config['result'] ] || config['result'], getDefault('variables'));
-        var xAPI_context = resolveFunctionsAndVars( getDefault('context')[ config['context'] ] || config['context'], getDefault('variables'));
+        var variables = config['variables'] || getDefault('variables');
+        
+        var xAPI_actor = resolveFunctionsAndVars( resolveDictonaryKey('actors', config['agent'], variables), variables);
+        var xAPI_verb = resolveFunctionsAndVars( resolveDictonaryKey('verbs', config['verb'], variables), variables);
+        var xAPI_object = resolveFunctionsAndVars( resolveDictonaryKey('objects', config['object'], variables), variables);
+        var xAPI_result = resolveFunctionsAndVars( resolveDictonaryKey('results', config['result'], variables), variables);
+        var xAPI_context = resolveFunctionsAndVars( resolveDictonaryKey('context', config['context'], variables), variables);
 
-        var xAPI_parent_activity = resolveFunctionsAndVars( getDefault('objects')[ config['parent-activity'] ] || config['parent-activity'], getDefault('variables'));
-        var xAPI_grouping_activity = resolveFunctionsAndVars( getDefault('objects')[ config['grouping-activity'] ] || config['grouping-activity'], getDefault('variables'));
-        var xAPI_context_activity = resolveFunctionsAndVars( getDefault('objects')[ config['context-activity'] ] || config['context-activity'], getDefault('variables'));
+        var xAPI_parent_activity = resolveFunctionsAndVars( resolveDictonaryKey('objects', config['parent-activity'], variables), variables);
+        var xAPI_grouping_activity = resolveFunctionsAndVars( resolveDictonaryKey('objects', config['grouping-activity'], variables), variables);
+        var xAPI_context_activity = resolveFunctionsAndVars( resolveDictonaryKey('objects', config['context-activity'], variables), variables);
         
         // allow construction of verb
         if (!xAPI_verb) {
@@ -234,9 +360,13 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
             }
         }
         
-        // allow construction of object
+        // create xAPI object if it doesn't exist and is configured to be created 
         if (!xAPI_object) {
+        
+            // check if config object exists
             if (config['object-id'] && config['object-name'] && config['object-desc']) {
+        
+                // create xAPI object
                 xAPI_verb = {
                     "objectType": "Activity",
                     "id": config['object-id'],
@@ -252,31 +382,75 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
             }
         }
         
-        // allow construction of actor or fallback on default
-        if (!xAPI_actor) { 
-            if((config['agent-name'] && config['agent-mbox']) || (config['agent-account-page'] && config['agent-account-name'])) {
+        // check if an xAPI statement has already been created
+        if (!xAPI_actor) {
+            // Then, check if the variables necessary to create an actor have been provided
+            if ((config['agent-name'] && config['agent-mbox']) || (config['agent-account-page'] && config['agent-account-name'])) {
+                // If they have, create an xAPI actor object
                 xAPI_actor = { "objectType": "Agent" }
+                // If there is a name for the actor, add it to the object
                 if (config['agent-name']) {
                     xAPI_actor.name = config['agent-name'];
                 }
+                // If there is an email address for the actor, add it to the object
                 if (config['agent-mbox']) {
-                   if (config['agent-hash-mbox']) {
-                       xAPI_actor.mbox = ADL.XAPIWrapper.hash( 'mailto:' + config['agent-mbox'] );
-                   } else {
-                       xAPI_actor.mbox = 'mailto:' + config['agent-mbox'];
-                   }
+                    // If the email address is to be hashed, hash it
+                    if (config['agent-hash-mbox']) {
+                        xAPI_actor.mbox = ADL.XAPIWrapper.hash('mailto:' + config['agent-mbox']);
+                    } else {
+                        // If it is not to be hashed, leave it as is
+                        xAPI_actor.mbox = 'mailto:' + config['agent-mbox'];
+                    }
                 }
-                if (config['agent-account-page'] && config['agent-account-name']){
+                // If there is an account page and account name, add them to the object
+                if (config['agent-account-page'] && config['agent-account-name']) {
                     xAPI_actor.account = {
                         homePage: config['agent-account-page'],
-                        name: config['agent-account-name']		    
+                        name: config['agent-account-name']
                     }
                 }
             } else {
+                // If not all of the variables have been provided, use the default actor
                 xAPI_actor = getDefault('getDefaultActor')();
             }
         }
         
+        
+        // Check if the actor is already defined
+        if (!xAPI_actor) {
+            // Check if we have the necessary values to build an actor object
+            if ((config['agent-name'] && config['agent-mbox']) || (config['agent-account-page'] && config['agent-account-name'])) {
+                xAPI_actor = { "objectType": "Agent" }
+                // If the name is defined, add it to the actor object
+                if (config['agent-name']) {
+                    xAPI_actor.name = config['agent-name'];
+                }
+                // If the email is defined, add it to the actor object
+                if (config['agent-mbox']) {
+                    // If we have to hash the email
+                    if (config['agent-hash-mbox']) {
+                        // Hash the email
+                        xAPI_actor.mbox = ADL.XAPIWrapper.hash('mailto:' + config['agent-mbox']);
+                    } else {
+                        // Add email to actor object
+                        xAPI_actor.mbox = 'mailto:' + config['agent-mbox'];
+                    }
+                }
+                // If the account page and name are defined, add them to the actor object
+                if (config['agent-account-page'] && config['agent-account-name']) {
+                    // Add account info to the actor object
+                    xAPI_actor.account = {
+                        homePage: config['agent-account-page'],
+                        name: config['agent-account-name']
+                    }
+                }
+            } else {
+                // If we do not have the necessary values to build an actor object 
+                // we will call the function to get the default actor object
+                xAPI_actor = getDefault('getDefaultActor')();
+            }
+        }
+
         // if we have everything construct and send statement
         if (xAPI_actor && xAPI_verb && xAPI_object) {
             
@@ -308,7 +482,12 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
         }
     }
     
-    
+    /**
+     * Send a statement to the LRS
+     *
+     * @param {Object} stmt - The statement to send
+     * @param {string} debug - The debug mode
+     */
     function sendStatement(stmt, debug) {
         
         // send statement
@@ -344,6 +523,22 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
         setDefault('defaultActor', actor);
     }
     
+    /**
+     * Evaluate a javascript expression in the context of an object
+     *
+     * @param {string} expression The expression to evaluate
+     * @param {object} context The context to evaluate the expression inside
+     * @return {any} The result of the evaluation
+     */
+    function runExpression(expression, variables){
+        try {
+            console.log(variables)
+            return new Function('$ctx', 'with($ctx) {'+ expression + '}')(variables);
+        } catch (e) {
+            console.error(e)
+        }
+    }
+
     /**
      * This function allows to override a global default by key or if a object is given as key to override all default at once
      *
@@ -382,17 +577,123 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
             return;
         }
         
-        // Redirects the error handler to getDefault('xhrRequestOnError')
+        /**
+         * Redirects the error handler to getDefault('xhrRequestOnError')
+         * @param {Object} xhr - The XMLHttpRequest object
+         * @param {String} method - The HTTP method used
+         * @param {String} url - The URL of the request
+         * @param {Function} callback - The callback function
+         * @param {Object} callbackargs - The arguments to be passed to the callback function
+         */
         ADL.xhrRequestOnError = function(xhr, method, url, callback, callbackargs){
             getDefault('xhrRequestOnError')(xhr, method, url, callback, callbackargs);
-        } 
+        }
         
-        // Fire HypeXAPI on HypeDocumentLoad
+        /**
+         * Send a statement to the LRS.
+         * 
+         * This function is used by a GUI component that only has string input fields, the LRS notation is then fetched from a lookup based on the provided string keys (HypeXAPI.hype-export.py).
+         * 
+         * @param {string} verb - The verb of the statement.
+         * @param {string} object - The object of the statement.
+         * @param {string} context - The context of the statement.
+         * @param {string} result - The result of the statement.
+         * @param {string} actor - The actor of the statement.
+         */
+        hypeDocument.sendStatementByArguments = function (verb, object, result, context, actor){
+            sendStatementByDictonary({
+                verb: verb,
+                object: object,
+                context: context,
+                result: result,
+                actor: actor,
+                variables: Object.assign(
+                    {}, 
+                    getDefault('variables'),
+                    hypeDocument.customData, 
+                )
+            })
+        }
+        
+       /**
+        * This function sends a statement to the LRS using the data-xapi-* attributes of the element.
+        *
+        * @param {HTMLElement} element - The element to send the statement for.
+        */
+        hypeDocument.sendStatementByDataset = function(element){
+            sendStatementByDictonary({
+                element: element,
+                store: Object.assign(
+                    {},
+                    getDefault('variables'),
+                    hypeDocument.customData,
+                )
+            })
+        }
+        
+        hypeDocument.runExpression = function(expression){
+            if (_default['useHypeActionEvents'] && ("HypeActionEvents" in window)){
+                return hypeDocument.triggerAction (expression);
+            }
+            runExpression(expression, hypeDocument.customData)
+        }
+        
+        /**
+         * Set a custom data variable (forwards it from the hypeDocument context)
+         * 
+         * This function is used to set a custom data variable that can be used in the LRS notation.
+         * 
+         * @param {string} key - The key of the custom data variable.
+         * @param {string} value - The value of the custom data variable.
+         */
+        hypeDocument.setCustomDataVariable = function(key, value){
+            setCustomDataVariable(key, value, hypeDocument.customData)
+        }
+        
+        /**
+         * This function is called on HypeDocumentLoad.
+         * It fires the HypeXAPI function if it exists.
+         * @param {HypeDocument} hypeDocument - The HypeDocument object.
+         * @param {HTMLElement} element - The element that triggered the event (document).
+         * @param {Event} event - The HypeDocumentLoad event object.
+         */
         if (typeof hypeDocument.functions().HypeXAPI == 'function'){
             hypeDocument.functions().HypeXAPI(hypeDocument, element, event);
         }
-        
+    }
     
+    /**
+     * Set a custom data variable.
+     * 
+     * This function is used to set a custom data variable that can be used in the LRS notation.
+     * 
+     * @param {string} key - The key of the custom data variable.
+     * @param {string} value - The value of the custom data variable.
+     * @param {object} store - The object to store the custom data variable in.
+     */
+    setCustomDataVariable = function(key, value, store){
+        if (key && typeof(store) == 'object') {
+            
+            var baseKey = resolveKeyToArray(key);
+            var variableKey = baseKey.pop();
+            if (baseKey.length){
+                store = resolveObjectByKey(store, baseKey, true);
+            }
+            
+            if (value.match(/^[0-9]+(\.[0-9]+)?$/)) {
+                value = parseFloat(value);
+                
+            } else if (value.trim().match(/^(true|false)$/i)) {
+                value = value.trim().toLowerCase() === 'true';
+                
+            } else {
+                var obj = resolveObjectNotation(value, store);
+                if (obj) value = obj;
+                
+            }
+            
+            store[variableKey] = value;
+        }
     }
     
     /* setup callbacks */
@@ -406,20 +707,45 @@ if("HypeXAPI " in window === false) window['HypeXAPI'] = (function () {
      * @property {Function} setDefault Set a default value used in this extension
      * @property {Function} setDefaultActor Set the default actor using setDefault('defaultActor')
      * @property {Function} sendStatementByDataset Send a statement based on dataset attributes
-     * @property {Function} sendStatementByConfig Send a statement based on a config object equivalent to the dataset keys (without data-xapi- prefix)
+     * @property {Function} sendStatementByDictonary Send a statement based on a config object equivalent to the dataset keys (without data-xapi- prefix)
      * @property {Function} changeConfig Forward updated config to ADL.XAPIWrapper
+     * @property {Object} GUI Contains functions as fallback for the export script.
+      * @property {Function} GUI.setCustomDataVariable Set a custom data variable
+      * @property {Function} GUI.sendStatementByArguments Send a statement based on function arguments
      */
      var HypeXAPI = {
-        version: '1.0.5',
+        version: '1.0.6',
         getDefault: getDefault,
         setDefault: setDefault,
         setDefaultActor: setDefaultActor,
         sendStatement: sendStatement,
         sendStatementByDataset: sendStatementByDataset,
-        sendStatementByConfig: sendStatementByConfig,
+        sendStatementByDictonary: sendStatementByDictonary,
         
         /* forward commands to ADL.XAPIWrapper */
         changeConfig: changeConfig,
+        
+        /* GUI fallback if not mapped to hypeDocument*/
+        GUI: {
+            runExpression: function(expression){
+                runExpression(expression, getDefault('variables')) 
+            },
+            
+            setCustomDataVariable: function(key, value){
+                setCustomDataVariable(key, value, getDefault('variables'))
+            },
+            
+            sendStatementByArguments: function (verb, object, result, context, actor){
+                sendStatementByDictonary({
+                    verb: verb,
+                    object: object,
+                    context: context,
+                    result: result,
+                    actor: actor
+                })
+            }
+            
+        }
     };
 
     /** 
