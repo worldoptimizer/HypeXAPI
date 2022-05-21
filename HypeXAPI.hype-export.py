@@ -4,8 +4,9 @@
 #	This export script offers helpers and GUI for HypeXAPI
 #
 #	v1.0.0 Initial release
-#   v1.0.1 Added closure compiler caching and error messages in previews   
-#   v1.0.2 Added cache compilation of HypeXAPI.js and xapiwrapper.js
+#	v1.0.1 Added closure compiler caching and error messages in previews   
+#	v1.0.2 Added cache compilation of HypeXAPI.js and xapiwrapper.js
+#	v1.0.3 Published on GitHub
 #
 #	MIT License
 #	Copyright (c) 2021 Max Ziebell
